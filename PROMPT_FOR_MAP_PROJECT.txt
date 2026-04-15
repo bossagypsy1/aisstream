@@ -1,0 +1,99 @@
+I have a local AIS backend running at http://localhost:3001 that streams real vessel data from AISStream.io.
+Replace all demo/mock/simulated data in this project with live data from that backend.
+
+---
+
+BACKEND INTERFACE
+
+There are two ways to consume data from the backend:
+
+--- Option A: WebSocket (preferred — live push updates) ---
+
+Connect to: ws://localhost:3001
+
+You will receive three message types:
+
+1. On connection — a snapshot of current state:
+{
+  "type": "snapshot",
+  "connected": true,
+  "totalReceived": 2445,
+  "messages": [ ...up to 100 AISUpdate objects, newest first... ]
+}
+
+2. For each new AIS message received — a live update:
+{
+  "type": "update",
+  "totalReceived": 2446,
+  "update": { ...single AISUpdate object... }
+}
+
+3. When the AISStream connection goes up or down:
+{
+  "type": "status",
+  "connected": true,
+  "totalReceived": 2446
+}
+
+Reconnect automatically if the WebSocket closes (retry every 3 seconds).
+
+--- Option B: HTTP polling (fallback) ---
+
+GET http://localhost:3001/status
+Returns:
+{
+  "connected": true,
+  "totalReceived": 2445,
+  "messages": [ ...last 50 AISUpdate objects, newest first... ]
+}
+
+---
+
+AISUpdate OBJECT SHAPE
+
+Every vessel update has this shape (all fields except mmsi and messageType may be null):
+
+{
+  "mmsi": "253834000",           // string — unique vessel identifier
+  "shipName": "VERSUTIUS",       // string — "—" if unknown
+  "messageType": "PositionReport",
+  "latitude": 50.718875,         // number | null — decimal degrees WGS84
+  "longitude": -1.051598,        // number | null — decimal degrees WGS84
+  "speed": 0.1,                  // number | null — knots (SOG)
+  "course": 226.3,               // number | null — degrees (COG, 0–359.9)
+  "heading": 154,                // number | null — degrees true heading (0–359)
+  "navStatus": "At anchor",      // string | null — human-readable navigational status
+  "timestamp": "2026-04-14 22:27:22.223962632 +0000 UTC"  // string
+}
+
+navStatus possible values:
+  "Under way (engine)", "At anchor", "Not under command", "Restricted maneuverability",
+  "Constrained by draught", "Moored", "Aground", "Fishing", "Under way (sailing)",
+  "Not defined", or null
+
+---
+
+DATA CHARACTERISTICS
+
+- Coverage: UK and surrounding waters (lat 49–62, lon -8 to +2)
+- Volume: roughly 50–150 vessel updates per second
+- Each update is a position ping from one vessel — the same MMSI will appear repeatedly
+- latitude/longitude are always valid WGS84 coordinates when not null
+- Use MMSI as the unique key to track/update vessel state on the map
+
+---
+
+SUGGESTED INTEGRATION APPROACH
+
+- On WebSocket connect: load the snapshot to populate initial vessel positions
+- On each "update" message: upsert the vessel by MMSI (update if exists, add if new)
+- On "status" message: show/hide a connection indicator
+- If using HTTP polling instead: GET /status every 2–3 seconds and upsert by MMSI
+
+---
+
+WHAT TO REMOVE
+
+- All demo data generators, fake vessel arrays, simulated position updates, timers
+  that produce mock data, and any hardcoded vessel lists
+- Replace with the WebSocket connection described above

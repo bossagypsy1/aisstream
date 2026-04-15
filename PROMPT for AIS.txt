@@ -1,0 +1,107 @@
+Build a local AIS vessel data viewer using Node.js + TypeScript that connects to AISStream.io via WebSocket and displays live vessel updates in a browser.
+
+---
+
+ARCHITECTURE
+
+- Single Node.js process, no frameworks
+- HTTP server on port 3001 (serves the HTML page and a /status + /debug REST endpoint)
+- WebSocket server on the same port pushes live updates to the browser
+- AISStream WebSocket client runs on the backend only — browser never touches AISStream directly
+- Four files total: package.json, tsconfig.json, src/server.ts, public/index.html
+
+---
+
+AISSTREAM CONNECTION
+
+- WebSocket endpoint: wss://stream.aisstream.io/v0/stream
+- API key: [INSERT YOUR API KEY]
+- Send this subscription message immediately on socket open:
+  {
+    APIKey: "...",
+    BoundingBoxes: [[[49.0, -8.0], [62.0, 2.0]]],   // UK bounding box
+    FilterMessageTypes: ["PositionReport"]
+  }
+- Auto-reconnect after 5 seconds if the socket closes
+
+---
+
+DATA HANDLING
+
+- Parse incoming JSON messages into a typed AISUpdate object with these fields:
+  mmsi, shipName, messageType, latitude, longitude, speed (SOG), course (COG),
+  heading (TrueHeading), navStatus (decoded from NavigationalStatus integer), timestamp
+- Field locations in AISStream response:
+  - MessageType: raw.MessageType
+  - MetaData: raw.MetaData (contains MMSI, ShipName, latitude, longitude, time_utc)
+  - Body: raw.Message[MessageType] (contains Sog, Cog, TrueHeading, NavigationalStatus, Latitude, Longitude)
+  - Prefer body lat/lon over MetaData lat/lon
+- Filter out invalid values: SOG >= 102.3, COG >= 360.0, TrueHeading === 511 = not available
+- Keep a rolling in-memory list of the last 300 messages (newest first)
+- Drop malformed messages silently, log a warning to console
+
+---
+
+BROWSER COMMUNICATION
+
+- On new browser WebSocket connection: send a "snapshot" message with current state + last 100 messages
+- On each new AIS message: broadcast an "update" message with the parsed update + new total count
+- On AISStream connect/disconnect: broadcast a "status" message
+
+Message types:
+  { type: "snapshot", connected: bool, totalReceived: number, messages: AISUpdate[] }
+  { type: "update", update: AISUpdate, totalReceived: number }
+  { type: "status", connected: bool, totalReceived: number }
+
+---
+
+DEBUG ENDPOINTS
+
+- GET /debug — returns JSON with: aisConnected, totalReceived, rawMessageCount, firstRawMessages (first 5 raw frames verbatim)
+- GET /status — returns JSON with: connected, totalReceived, messages (last 50 parsed)
+- Log the first 10 raw frames to the console on startup, then suppress further raw logs
+
+---
+
+FRONTEND (public/index.html)
+
+- Dark monospace theme, no framework, no build step — plain HTML + inline JS + inline CSS
+- Status bar at top showing:
+  - Coloured dot (green = connected, red = disconnected) + text
+  - Total message count
+  - Browser WebSocket status (separate from AISStream status)
+- Table of recent AIS updates, newest first, max 100 rows shown
+- Columns: MMSI | Ship Name | Type | Latitude | Longitude | Speed (kn) | Course ° | Heading ° | Nav Status | Timestamp (UTC)
+- Flash animation on new rows
+- Shorten verbose type names (e.g. PositionReport → PosRpt)
+- Browser WebSocket auto-reconnects every 3 seconds if dropped
+- On load: connect to ws://[location.host], receive snapshot, render history, then stream updates live
+
+---
+
+DEPENDENCIES (minimal)
+
+- ws: ^8.x  (WebSocket server + client)
+- tsx: ^4.x  (run TypeScript directly, no compile step)
+- typescript: ^5.x
+- @types/node, @types/ws
+
+---
+
+HOW TO RUN ON WINDOWS
+
+npm install is run via: npm.cmd install
+Server is started via: nohup node node_modules/tsx/dist/cli.mjs src/server.ts > server.log 2>&1 &
+(npx may not be available in all shell environments on Windows)
+
+Then open: http://localhost:3001
+
+---
+
+TUNING NOTES (explain these to the user after building)
+
+- To reduce data: shrink the bounding box, or remove message types from FilterMessageTypes
+- To increase data: add more bounding boxes, add "StandardClassBPositionReport" for small craft
+- To go global: use [[[-90, -180], [90, 180]]] — very high volume
+- MAX_MESSAGES (server) and MAX_ROWS (browser) control history depth
+- All tunable values are in clearly labelled constants at the top of server.ts
