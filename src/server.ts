@@ -22,8 +22,8 @@ const BOUNDING_BOXES: [[number, number], [number, number]][] = [
 // Add 'StandardClassBPositionReport' for smaller craft if you want more data.
 const FILTER_MESSAGE_TYPES: string[] = [
   'PositionReport',
-  // 'StandardClassBPositionReport',
-  // 'ShipStaticData',
+  'StandardClassBPositionReport',
+  'ShipStaticData',
 ];
 
 // How many messages to keep in memory (rolling)
@@ -42,11 +42,19 @@ interface AISUpdate {
   messageType: string;
   latitude: number | null;
   longitude: number | null;
-  speed: number | null;   // knots (SOG)
-  course: number | null;  // degrees (COG)
-  heading: number | null; // degrees (true heading)
+  speed: number | null;      // knots (SOG)
+  course: number | null;     // degrees (COG)
+  heading: number | null;    // degrees (true heading)
   navStatus: string | null;
   timestamp: string;
+  // From ShipStaticData
+  callsign: string | null;
+  imo: string | null;
+  vesselType: string | null;
+  lengthM: number | null;
+  widthM: number | null;
+  draught: number | null;
+  destination: string | null;
 }
 
 interface BrowserMessage {
@@ -75,6 +83,21 @@ const NAV_STATUS: Record<number, string> = {
   7: 'Fishing',
   8: 'Under way (sailing)',
   15: 'Not defined',
+};
+
+const VESSEL_TYPE: Record<number, string> = {
+  0: 'Unknown', 20: 'Wing in ground', 21: 'Wing in ground (hazardous A)',
+  30: 'Fishing', 31: 'Towing', 32: 'Towing (large)', 33: 'Dredging',
+  34: 'Diving', 35: 'Military', 36: 'Sailing', 37: 'Pleasure craft',
+  50: 'Pilot', 51: 'SAR', 52: 'Tug', 53: 'Port tender',
+  54: 'Anti-pollution', 55: 'Law enforcement', 58: 'Medical',
+  60: 'Passenger', 61: 'Passenger (hazardous A)', 62: 'Passenger (hazardous B)',
+  69: 'Passenger (other)',
+  70: 'Cargo', 71: 'Cargo (hazardous A)', 72: 'Cargo (hazardous B)',
+  79: 'Cargo (other)',
+  80: 'Tanker', 81: 'Tanker (hazardous A)', 82: 'Tanker (hazardous B)',
+  89: 'Tanker (other)',
+  90: 'Other',
 };
 
 // ---------------------------------------------------------------------------
@@ -109,21 +132,47 @@ function parseAISMessage(raw: any): AISUpdate | null {
       return null;
     }
 
-    // Latitude / longitude: prefer the typed message body, fall back to MetaData
+    const shipName: string = (meta.ShipName ?? body?.Name ?? '').trim() || '—';
+    const timestamp: string =
+      typeof meta.time_utc === 'string' ? meta.time_utc : new Date().toISOString();
+
+    // ── ShipStaticData — no position, but rich vessel metadata ────────────────
+    if (messageType === 'ShipStaticData') {
+      const typeCode: number | undefined = body?.Type;
+      const dim = body?.Dimension ?? {};
+      const lenA: number = dim.A ?? 0;
+      const lenB: number = dim.B ?? 0;
+      const widC: number = dim.C ?? 0;
+      const widD: number = dim.D ?? 0;
+      const lengthM = (lenA + lenB) > 0 ? lenA + lenB : null;
+      const widthM  = (widC + widD) > 0 ? widC + widD : null;
+
+      return {
+        mmsi, shipName, messageType, timestamp,
+        latitude: null, longitude: null,
+        speed: null, course: null, heading: null, navStatus: null,
+        callsign:   (body?.CallSign ?? '').trim() || null,
+        imo:        body?.ImoNumber ? String(body.ImoNumber) : null,
+        vesselType: typeCode != null ? String(typeCode) : null,
+        lengthM,
+        widthM,
+        draught:     body?.MaximumStaticDraught ?? null,
+        destination: (body?.Destination ?? '').trim() || null,
+      };
+    }
+
+    // ── PositionReport + StandardClassBPositionReport ─────────────────────────
     const rawLat: number | undefined = body?.Latitude ?? meta.latitude;
     const rawLon: number | undefined = body?.Longitude ?? meta.longitude;
-    const latitude = rawLat != null && Math.abs(rawLat) <= 90 ? rawLat : null;
+    const latitude  = rawLat != null && Math.abs(rawLat) <= 90  ? rawLat  : null;
     const longitude = rawLon != null && Math.abs(rawLon) <= 180 ? rawLon : null;
 
-    // SOG: 102.3 = not available per AIS spec
     const rawSog: number | undefined = body?.Sog;
     const speed = rawSog != null && rawSog < 102.3 ? rawSog : null;
 
-    // COG: 360.0 = not available
     const rawCog: number | undefined = body?.Cog;
     const course = rawCog != null && rawCog < 360.0 ? rawCog : null;
 
-    // True heading: 511 = not available
     const rawHdg: number | undefined = body?.TrueHeading;
     const heading = rawHdg != null && rawHdg !== 511 ? rawHdg : null;
 
@@ -131,12 +180,12 @@ function parseAISMessage(raw: any): AISUpdate | null {
     const navStatus =
       navStatusCode != null ? (NAV_STATUS[navStatusCode] ?? `Status ${navStatusCode}`) : null;
 
-    const shipName: string = (meta.ShipName ?? '').trim() || '—';
-
-    const timestamp: string =
-      typeof meta.time_utc === 'string' ? meta.time_utc : new Date().toISOString();
-
-    return { mmsi, shipName, messageType, latitude, longitude, speed, course, heading, navStatus, timestamp };
+    return {
+      mmsi, shipName, messageType, timestamp,
+      latitude, longitude, speed, course, heading, navStatus,
+      callsign: null, imo: null, vesselType: null,
+      lengthM: null, widthM: null, draught: null, destination: null,
+    };
   } catch {
     return null;
   }

@@ -11,7 +11,7 @@
       font-family: monospace;
       background: #0e0e0e;
       color: #d4d4d4;
-      font-size: 13px;
+      font-size: 12px;
       padding: 16px;
     }
 
@@ -26,21 +26,21 @@
       padding: 10px 14px;
       border-radius: 4px;
       margin-bottom: 16px;
+      flex-wrap: wrap;
     }
 
     #conn-indicator {
       display: inline-block;
-      width: 10px;
-      height: 10px;
+      width: 10px; height: 10px;
       border-radius: 50%;
       background: #555;
       margin-right: 6px;
     }
-    #conn-indicator.connected { background: #3fb950; }
+    #conn-indicator.connected    { background: #3fb950; }
     #conn-indicator.disconnected { background: #f85149; }
 
-    #conn-text { color: #ccc; }
-    #message-count { color: #58a6ff; }
+    #conn-text      { color: #ccc; }
+    #message-count  { color: #58a6ff; }
 
     #log-header {
       color: #888;
@@ -50,56 +50,65 @@
       letter-spacing: 0.05em;
     }
 
-    #log {
+    .table-wrap {
       width: 100%;
+      overflow-x: auto;
+    }
+
+    #log {
+      width: max-content;
+      min-width: 100%;
       border-collapse: collapse;
     }
 
     #log thead th {
       text-align: left;
       color: #888;
-      font-size: 11px;
+      font-size: 10px;
       text-transform: uppercase;
       letter-spacing: 0.05em;
       padding: 4px 8px;
       border-bottom: 1px solid #333;
+      white-space: nowrap;
+      position: sticky;
+      top: 0;
+      background: #0e0e0e;
     }
 
-    #log tbody tr {
-      border-bottom: 1px solid #1e1e1e;
-    }
-
-    #log tbody tr:hover {
-      background: #1a1a1a;
-    }
+    #log tbody tr { border-bottom: 1px solid #1a1a1a; }
+    #log tbody tr:hover { background: #1a1a1a; }
 
     #log tbody td {
-      padding: 5px 8px;
+      padding: 4px 8px;
       vertical-align: top;
       white-space: nowrap;
     }
 
-    .new-flash {
-      animation: flash 0.6s ease-out;
-    }
-
+    .new-flash { animation: flash 0.6s ease-out; }
     @keyframes flash {
       from { background-color: #1f3a1f; }
       to   { background-color: transparent; }
     }
 
-    .col-mmsi    { color: #e3b341; min-width: 100px; }
-    .col-name    { color: #79c0ff; min-width: 140px; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
-    .col-type    { color: #bc8cff; min-width: 80px; }
-    .col-lat     { color: #d4d4d4; min-width: 90px; }
-    .col-lon     { color: #d4d4d4; min-width: 90px; }
-    .col-speed   { color: #3fb950; min-width: 60px; }
-    .col-course  { color: #d4d4d4; min-width: 60px; }
-    .col-heading { color: #d4d4d4; min-width: 60px; }
-    .col-status  { color: #8b949e; min-width: 160px; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
-    .col-time    { color: #555; min-width: 80px; }
+    .col-mmsi    { color: #e3b341; }
+    .col-name    { color: #79c0ff; max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+    .col-call    { color: #d2a8ff; }
+    .col-imo     { color: #d2a8ff; }
+    .col-vtype   { color: #bc8cff; max-width: 140px; overflow: hidden; text-overflow: ellipsis; }
+    .col-mtype   { color: #6e7681; }
+    .col-lat     { color: #d4d4d4; }
+    .col-lon     { color: #d4d4d4; }
+    .col-speed   { color: #3fb950; }
+    .col-course  { color: #d4d4d4; }
+    .col-heading { color: #d4d4d4; }
+    .col-status  { color: #8b949e; max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+    .col-len     { color: #ffa657; }
+    .col-wid     { color: #ffa657; }
+    .col-draught { color: #ffa657; }
+    .col-dest    { color: #79c0ff; max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
+    .col-time    { color: #555; }
 
-    .dim { color: #555; }
+    .dim { color: #444; }
   </style>
 </head>
 <body>
@@ -115,102 +124,109 @@
   <span id="browser-ws-status" style="color:#555;">Browser: connecting…</span>
 </div>
 
-<div id="log-header">Recent AIS updates — newest first (max 100 rows shown)</div>
+<div id="log-header">Recent AIS updates — newest first (max 100 rows)</div>
 
+<div class="table-wrap">
 <table id="log">
   <thead>
     <tr>
       <th>MMSI</th>
       <th>Ship Name</th>
-      <th>Type</th>
+      <th>Callsign</th>
+      <th>IMO</th>
+      <th>Vessel Type</th>
+      <th>Msg</th>
       <th>Latitude</th>
       <th>Longitude</th>
-      <th>Speed (kn)</th>
+      <th>Speed kn</th>
       <th>Course °</th>
       <th>Heading °</th>
       <th>Nav Status</th>
+      <th>Length m</th>
+      <th>Width m</th>
+      <th>Draught m</th>
+      <th>Destination</th>
       <th>Timestamp (UTC)</th>
     </tr>
   </thead>
   <tbody id="log-body">
     <tr id="waiting-row">
-      <td colspan="10" class="dim" style="padding:12px 8px;">Waiting for data…</td>
+      <td colspan="17" class="dim" style="padding:12px 8px;">Waiting for data…</td>
     </tr>
   </tbody>
 </table>
+</div>
 
 <script>
   const MAX_ROWS = 100;
-  const logBody = document.getElementById('log-body');
-  const connIndicator = document.getElementById('conn-indicator');
-  const connText = document.getElementById('conn-text');
-  const messageCount = document.getElementById('message-count');
+  const logBody        = document.getElementById('log-body');
+  const connIndicator  = document.getElementById('conn-indicator');
+  const connText       = document.getElementById('conn-text');
+  const messageCount   = document.getElementById('message-count');
   const browserWsStatus = document.getElementById('browser-ws-status');
 
-  let totalReceived = 0;
   let rowCount = 0;
 
-  function fmt(v, decimals = 2) {
-    return v != null ? Number(v).toFixed(decimals) : '<span class="dim">—</span>';
+  const nil = '<span class="dim">—</span>';
+
+  function fmt(v, dec = 2) {
+    return v != null ? Number(v).toFixed(dec) : nil;
   }
 
-  function shortType(type) {
-    // Shorten verbose type names for display
+  function str(v) {
+    return (v && String(v).trim()) ? String(v).trim() : nil;
+  }
+
+  function shortMsg(type) {
     const map = {
-      'PositionReport': 'PosRpt',
-      'StandardClassBPositionReport': 'ClassB',
-      'ShipStaticData': 'Static',
-      'ExtendedClassBPositionReport': 'ClassB+',
-      'AidsToNavigationReport': 'AtoN',
-      'BaseStationReport': 'BaseStation',
+      'PositionReport':                 'PosRpt',
+      'StandardClassBPositionReport':   'ClassB',
+      'ShipStaticData':                 'Static',
+      'ExtendedClassBPositionReport':   'ClassB+',
+      'AidsToNavigationReport':         'AtoN',
+      'BaseStationReport':              'Base',
     };
     return map[type] || type;
   }
 
   function setConnectionStatus(connected) {
     connIndicator.className = connected ? 'connected' : 'disconnected';
-    connText.textContent = connected
-      ? 'Connected to AISStream'
-      : 'Disconnected from AISStream';
+    connText.textContent    = connected ? 'Connected to AISStream' : 'Disconnected from AISStream';
   }
 
   function setCount(n) {
-    totalReceived = n;
-    messageCount.textContent = `${n.toLocaleString()} message${n !== 1 ? 's' : ''} received`;
+    messageCount.textContent = `${Number(n).toLocaleString()} message${n !== 1 ? 's' : ''} received`;
   }
 
   function prependRow(u) {
-    // Remove the "Waiting..." placeholder on first message
     const waiting = document.getElementById('waiting-row');
     if (waiting) waiting.remove();
 
     const tr = document.createElement('tr');
     tr.className = 'new-flash';
     tr.innerHTML = `
-      <td class="col-mmsi">${u.mmsi}</td>
-      <td class="col-name" title="${u.shipName}">${u.shipName}</td>
-      <td class="col-type">${shortType(u.messageType)}</td>
+      <td class="col-mmsi">${str(u.mmsi)}</td>
+      <td class="col-name"  title="${u.shipName || ''}">${str(u.shipName)}</td>
+      <td class="col-call">${str(u.callsign)}</td>
+      <td class="col-imo">${str(u.imo)}</td>
+      <td class="col-vtype" title="${u.vesselType || ''}">${str(u.vesselType)}</td>
+      <td class="col-mtype">${shortMsg(u.messageType)}</td>
       <td class="col-lat">${fmt(u.latitude, 5)}</td>
       <td class="col-lon">${fmt(u.longitude, 5)}</td>
       <td class="col-speed">${fmt(u.speed, 1)}</td>
       <td class="col-course">${fmt(u.course, 1)}</td>
       <td class="col-heading">${fmt(u.heading, 0)}</td>
-      <td class="col-status" title="${u.navStatus || ''}">${u.navStatus || '<span class="dim">—</span>'}</td>
-      <td class="col-time">${u.timestamp ? u.timestamp.replace('T', ' ').replace(/\.\d+Z$/, '') : ''}</td>
+      <td class="col-status" title="${u.navStatus || ''}">${str(u.navStatus)}</td>
+      <td class="col-len">${fmt(u.lengthM, 0)}</td>
+      <td class="col-wid">${fmt(u.widthM, 0)}</td>
+      <td class="col-draught">${fmt(u.draught, 1)}</td>
+      <td class="col-dest" title="${u.destination || ''}">${str(u.destination)}</td>
+      <td class="col-time">${u.timestamp ? u.timestamp.replace('T',' ').replace(/\.\d+Z$/,'') : nil}</td>
     `;
     logBody.insertBefore(tr, logBody.firstChild);
     rowCount++;
-
-    // Trim to MAX_ROWS
-    while (rowCount > MAX_ROWS) {
-      logBody.removeChild(logBody.lastChild);
-      rowCount--;
-    }
+    while (rowCount > MAX_ROWS) { logBody.removeChild(logBody.lastChild); rowCount--; }
   }
-
-  // -----------------------------------------------------------------------
-  // WebSocket connection to local backend
-  // -----------------------------------------------------------------------
 
   function connect() {
     const ws = new WebSocket(`ws://${location.host}`);
@@ -240,21 +256,15 @@
           setConnectionStatus(msg.connected);
           if (msg.totalReceived != null) setCount(msg.totalReceived);
           break;
-
         case 'update':
           if (msg.update) prependRow(msg.update);
           if (msg.totalReceived != null) setCount(msg.totalReceived);
           break;
-
         case 'snapshot':
           setConnectionStatus(msg.connected);
           if (msg.totalReceived != null) setCount(msg.totalReceived);
           if (Array.isArray(msg.messages)) {
-            // Load history newest-first (already sorted that way by server)
-            // Insert in reverse so the DOM order ends up newest-first
-            for (let i = msg.messages.length - 1; i >= 0; i--) {
-              prependRow(msg.messages[i]);
-            }
+            for (let i = msg.messages.length - 1; i >= 0; i--) prependRow(msg.messages[i]);
           }
           break;
       }
