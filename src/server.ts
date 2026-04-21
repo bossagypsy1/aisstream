@@ -94,18 +94,26 @@ const NAV_STATUS: Record<number, string> = {
 };
 
 const VESSEL_TYPE: Record<number, string> = {
-  0: 'Unknown', 20: 'Wing in ground', 21: 'Wing in ground (hazardous A)',
-  30: 'Fishing', 31: 'Towing', 32: 'Towing (large)', 33: 'Dredging',
-  34: 'Diving', 35: 'Military', 36: 'Sailing', 37: 'Pleasure craft',
-  50: 'Pilot', 51: 'SAR', 52: 'Tug', 53: 'Port tender',
-  54: 'Anti-pollution', 55: 'Law enforcement', 58: 'Medical',
-  60: 'Passenger', 61: 'Passenger (hazardous A)', 62: 'Passenger (hazardous B)',
-  69: 'Passenger (other)',
-  70: 'Cargo', 71: 'Cargo (hazardous A)', 72: 'Cargo (hazardous B)',
-  79: 'Cargo (other)',
-  80: 'Tanker', 81: 'Tanker (hazardous A)', 82: 'Tanker (hazardous B)',
-  89: 'Tanker (other)',
-  90: 'Other',
+  0:  'Not available',
+  20: 'Wing in ground (WIG)',     21: 'WIG — Hazardous A',
+  22: 'WIG — Hazardous B',        23: 'WIG — Hazardous C',        24: 'WIG — Hazardous D',
+  30: 'Fishing',                  31: 'Towing',                   32: 'Towing (large)',
+  33: 'Dredging / underwater',    34: 'Diving ops',               35: 'Military ops',
+  36: 'Sailing',                  37: 'Pleasure craft',
+  40: 'High-speed craft (HSC)',   41: 'HSC — Hazardous A',
+  42: 'HSC — Hazardous B',        43: 'HSC — Hazardous C',        44: 'HSC — Hazardous D',
+  50: 'Pilot vessel',             51: 'Search and rescue',        52: 'Tug',
+  53: 'Port tender',              54: 'Anti-pollution',           55: 'Law enforcement',
+  56: 'Spare (unclassified)',     57: 'Medical transport',        58: 'Ship per RR',
+  59: 'Special craft',
+  60: 'Passenger',                61: 'Passenger — Hazardous A', 62: 'Passenger — Hazardous B',
+  63: 'Passenger — Hazardous C', 64: 'Passenger — Hazardous D',
+  70: 'Cargo',                    71: 'Cargo — Hazardous A',     72: 'Cargo — Hazardous B',
+  73: 'Cargo — Hazardous C',      74: 'Cargo — Hazardous D',
+  80: 'Tanker',                   81: 'Tanker — Hazardous A',    82: 'Tanker — Hazardous B',
+  83: 'Tanker — Hazardous C',     84: 'Tanker — Hazardous D',
+  90: 'Other',                    91: 'Other — Hazardous A',     92: 'Other — Hazardous B',
+  93: 'Other — Hazardous C',      94: 'Other — Hazardous D',     99: 'Unknown',
 };
 
 // ---------------------------------------------------------------------------
