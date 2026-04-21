@@ -2,6 +2,13 @@ import * as http from 'http';
 import * as fs from 'fs';
 import * as path from 'path';
 import WebSocket, { WebSocketServer } from 'ws';
+import {
+  setupSchema,
+  upsertVessel,
+  loadAllVessels,
+  cleanupOldVessels,
+  VesselRow,
+} from './db';
 
 // ---------------------------------------------------------------------------
 // Configuration — edit these to tune the stream
@@ -18,19 +25,20 @@ const BOUNDING_BOXES: [[number, number], [number, number]][] = [
 ];
 
 // Message types to subscribe to.
-// PositionReport (Class A) is the most common vessel type.
-// Add 'StandardClassBPositionReport' for smaller craft if you want more data.
 const FILTER_MESSAGE_TYPES: string[] = [
   'PositionReport',
   'StandardClassBPositionReport',
   'ShipStaticData',
 ];
 
-// How many messages to keep in memory (rolling)
+// How many raw messages to keep in the rolling buffer (for the HTML page table)
 const MAX_MESSAGES = 300;
 
 // Reconnect delay in ms if the AISStream socket closes
 const RECONNECT_DELAY_MS = 5000;
+
+// How often to run the 24-hour cleanup against Neon (every hour)
+const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -104,11 +112,105 @@ const VESSEL_TYPE: Record<number, string> = {
 // State
 // ---------------------------------------------------------------------------
 
+// Rolling raw message buffer — drives the HTML page table (unchanged behaviour)
 const recentMessages: AISUpdate[] = [];
+
+// Server-side merged vessel state keyed by MMSI — this is the source of truth
+// served to the map frontend. Seeded from Neon on startup.
+const vesselMap = new Map<string, AISUpdate>();
+
 let totalReceived = 0;
 let aisConnected = false;
 let rawMessageLog: unknown[] = [];   // stores first 5 raw messages for /debug
-let rawMessageCount = 0;             // total raw frames received (including unparseable)
+let rawMessageCount = 0;
+
+// ---------------------------------------------------------------------------
+// Merge an incoming AISUpdate into the server-side vessel map
+// ---------------------------------------------------------------------------
+
+function mergeIntoVesselMap(u: AISUpdate): void {
+  const prev = vesselMap.get(u.mmsi);
+  if (!prev) {
+    vesselMap.set(u.mmsi, { ...u });
+    return;
+  }
+
+  const hasPosition = u.latitude != null && u.longitude != null;
+
+  vesselMap.set(u.mmsi, {
+    ...prev,
+    messageType: u.messageType,
+    timestamp:   u.timestamp,
+    // Only overwrite ship name if the new one is non-empty
+    shipName:    (u.shipName && u.shipName !== '—') ? u.shipName : prev.shipName,
+    // Position fields: only update when this message carries a position fix
+    latitude:    hasPosition ? u.latitude   : prev.latitude,
+    longitude:   hasPosition ? u.longitude  : prev.longitude,
+    speed:       hasPosition ? (u.speed     ?? prev.speed)     : prev.speed,
+    course:      hasPosition ? (u.course    ?? prev.course)    : prev.course,
+    heading:     hasPosition ? (u.heading   ?? prev.heading)   : prev.heading,
+    navStatus:   hasPosition ? (u.navStatus ?? prev.navStatus) : prev.navStatus,
+    // Static fields: prefer non-null
+    callsign:    u.callsign    ?? prev.callsign,
+    imo:         u.imo         ?? prev.imo,
+    vesselType:  u.vesselType  ?? prev.vesselType,
+    lengthM:     u.lengthM     ?? prev.lengthM,
+    widthM:      u.widthM      ?? prev.widthM,
+    draught:     u.draught     ?? prev.draught,
+    destination: u.destination ?? prev.destination,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Convert AISUpdate ↔ VesselRow (for Neon persistence)
+// ---------------------------------------------------------------------------
+
+function toVesselRow(u: AISUpdate): VesselRow {
+  const isPosition = u.latitude != null && u.longitude != null;
+  const isStatic   = u.messageType === 'ShipStaticData';
+  return {
+    mmsi:             u.mmsi,
+    ship_name:        (u.shipName && u.shipName !== '—') ? u.shipName : null,
+    callsign:         u.callsign,
+    imo:              u.imo,
+    vessel_type:      u.vesselType,
+    length_m:         u.lengthM,
+    width_m:          u.widthM,
+    latitude:         u.latitude,
+    longitude:        u.longitude,
+    speed:            u.speed,
+    course:           u.course,
+    heading:          u.heading,
+    nav_status:       u.navStatus,
+    draught:          u.draught,
+    destination:      u.destination,
+    last_position_at: isPosition ? u.timestamp : null,
+    last_static_at:   isStatic   ? u.timestamp : null,
+    updated_at:       u.timestamp,
+  };
+}
+
+function fromVesselRow(r: VesselRow): AISUpdate {
+  return {
+    mmsi:        r.mmsi,
+    shipName:    r.ship_name ?? '—',
+    messageType: 'Persisted',
+    latitude:    r.latitude  ?? null,
+    longitude:   r.longitude ?? null,
+    speed:       r.speed     ?? null,
+    course:      r.course    ?? null,
+    heading:     r.heading   ?? null,
+    navStatus:   r.nav_status,
+    timestamp:   r.last_position_at ?? r.updated_at,
+    callsign:    r.callsign,
+    imo:         r.imo,
+    vesselType:  r.vessel_type,
+    lengthM:     r.length_m  ?? null,
+    widthM:      r.width_m   ?? null,
+    draught:     r.draught   ?? null,
+    destination: r.destination,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Parse a raw AISStream JSON message into an AISUpdate
@@ -192,11 +294,10 @@ function parseAISMessage(raw: any): AISUpdate | null {
 }
 
 // ---------------------------------------------------------------------------
-// HTTP server — serves the HTML page and a /status JSON endpoint
+// HTTP server
 // ---------------------------------------------------------------------------
 
 const httpServer = http.createServer((req, res) => {
-  // Allow the map app (localhost:3000) to call this server cross-origin
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -205,30 +306,28 @@ const httpServer = http.createServer((req, res) => {
   if (req.url === '/' || req.url === '/index.html') {
     const filePath = path.join(__dirname, '..', 'public', 'index.html');
     fs.readFile(filePath, (err, data) => {
-      if (err) {
-        res.writeHead(500);
-        res.end('Could not read index.html');
-        return;
-      }
+      if (err) { res.writeHead(500); res.end('Could not read index.html'); return; }
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(data);
     });
     return;
   }
 
+  // /status — returns the server-side merged vessel map to the map frontend.
+  // Each MMSI appears exactly once with its fully merged state.
   if (req.url === '/status') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(
       JSON.stringify({
-        connected: aisConnected,
+        connected:     aisConnected,
         totalReceived,
-        messages: recentMessages.slice(0, 50),
+        messages:      Array.from(vesselMap.values()),
       })
     );
     return;
   }
 
-  // Debug endpoint: shows raw connection health and first few frames verbatim
+  // /debug — raw connection health and first few frames verbatim
   if (req.url === '/debug') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(
@@ -236,6 +335,7 @@ const httpServer = http.createServer((req, res) => {
         aisConnected,
         totalReceived,
         rawMessageCount,
+        vesselCount:      vesselMap.size,
         firstRawMessages: rawMessageLog,
       }, null, 2)
     );
@@ -262,12 +362,12 @@ function broadcast(msg: BrowserMessage): void {
 }
 
 wss.on('connection', (socket) => {
-  // Send a snapshot of current state to the newly connected browser tab
+  // Send merged snapshot to newly connected browser tab
   const snapshot: BrowserMessage = {
     type: 'snapshot',
     connected: aisConnected,
     totalReceived,
-    messages: recentMessages.slice(0, 100),
+    messages: Array.from(vesselMap.values()).slice(0, 100),
   };
   socket.send(JSON.stringify(snapshot));
 });
@@ -311,7 +411,6 @@ function connectToAISStream(): void {
       rawMessageLog.push(raw);
       console.log(`[raw #${rawMessageCount}]`, JSON.stringify(raw).slice(0, 300));
     } else if (rawMessageCount <= 10) {
-      // Log a few more to console only
       console.log(`[raw #${rawMessageCount}]`, JSON.stringify(raw).slice(0, 300));
     } else if (rawMessageCount === 11) {
       console.log('[raw] Suppressing further raw logs. Check /debug for samples.');
@@ -321,8 +420,16 @@ function connectToAISStream(): void {
     if (!update) return;
 
     totalReceived++;
+
+    // 1. Raw rolling buffer — keeps the HTML page table working as before
     recentMessages.unshift(update);
     if (recentMessages.length > MAX_MESSAGES) recentMessages.length = MAX_MESSAGES;
+
+    // 2. Merge into server-side vessel map (source of truth for the map frontend)
+    mergeIntoVesselMap(update);
+
+    // 3. Persist merged state to Neon (fire-and-forget, non-blocking)
+    upsertVessel(toVesselRow(vesselMap.get(update.mmsi)!)).catch(() => {/* already logged in db.ts */});
 
     broadcast({ type: 'update', update, totalReceived });
   });
@@ -336,7 +443,6 @@ function connectToAISStream(): void {
 
   ws.on('error', (err) => {
     console.error('AISStream WebSocket error:', err.message);
-    // 'close' will fire after this, triggering reconnect
   });
 }
 
@@ -344,9 +450,40 @@ function connectToAISStream(): void {
 // Start
 // ---------------------------------------------------------------------------
 
-httpServer.listen(PORT, () => {
-  console.log(`AIS Viewer running at http://localhost:${PORT}`);
-  console.log(`WebSocket endpoint for browser: ws://localhost:${PORT}`);
-});
+async function start(): Promise<void> {
+  // 1. Ensure the schema exists in Neon
+  await setupSchema();
 
-connectToAISStream();
+  // 2. Seed in-memory vessel map from persisted DB state (survives restarts)
+  const rows = await loadAllVessels();
+  for (const row of rows) {
+    vesselMap.set(row.mmsi, fromVesselRow(row));
+  }
+  if (rows.length > 0) {
+    console.log(`[db] Loaded ${rows.length} vessel(s) from Neon into memory`);
+  }
+
+  // 3. Schedule hourly cleanup of records older than 24 hours
+  setInterval(async () => {
+    const deleted = await cleanupOldVessels();
+    if (deleted > 0) {
+      console.log(`[db] Cleaned up ${deleted} vessel record(s) older than 24 hours`);
+      // Also remove from in-memory map if they've gone stale
+      // (vessel will re-appear naturally if it broadcasts again)
+    }
+  }, CLEANUP_INTERVAL_MS);
+
+  // 4. Start HTTP server
+  httpServer.listen(PORT, () => {
+    console.log(`AIS Viewer running at http://localhost:${PORT}`);
+    console.log(`WebSocket endpoint for browser: ws://localhost:${PORT}`);
+  });
+
+  // 5. Connect to AISStream
+  connectToAISStream();
+}
+
+start().catch((err) => {
+  console.error('Fatal startup error:', err);
+  process.exit(1);
+});
