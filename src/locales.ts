@@ -19,7 +19,9 @@ export const LOCALES: Locale[] = [
     name:         'Senegal Coast',
     center:       [14.5, -17.0],
     zoom:         7,
-    boundingBoxes: [[[11.5, -18.5], [17.5, -13.5]]],
+    // Covers Senegal coast + ~200nm offshore (11.5°N–17.5°N, 13.5°W–21°W)
+    // UK is at 49–62°N — no overlap possible
+    boundingBoxes: [[[11.5, -21.0], [17.5, -13.5]]],
   },
 ];
 

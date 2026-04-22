@@ -358,7 +358,8 @@ const httpServer = http.createServer((req, res) => {
           return;
         }
 
-        console.log(`[locale] Switching from ${activeLocale.name} → ${next.name}`);
+        console.log(`[locale] Switching: ${activeLocale.name} → ${next.name}`);
+        console.log(`[locale] New bounding boxes: ${JSON.stringify(next.boundingBoxes)}`);
         activeLocale = next;
 
         // Close existing AIS connection (close handler won't reconnect — see guard above)
@@ -387,7 +388,7 @@ const httpServer = http.createServer((req, res) => {
     return;
   }
 
-  // /debug — raw connection health and first few frames verbatim
+  // /debug — connection health, active locale, and first few raw frames
   if (req.url === '/debug') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(
@@ -396,6 +397,16 @@ const httpServer = http.createServer((req, res) => {
         totalReceived,
         rawMessageCount,
         vesselCount:      vesselMap.size,
+        activeLocale: {
+          id:           activeLocale.id,
+          name:         activeLocale.name,
+          boundingBoxes: activeLocale.boundingBoxes,
+        },
+        availableLocales: LOCALES.map((l) => ({
+          id:           l.id,
+          name:         l.name,
+          boundingBoxes: l.boundingBoxes,
+        })),
         firstRawMessages: rawMessageLog,
       }, null, 2)
     );
@@ -442,21 +453,22 @@ function connectToAISStream(locale: Locale = activeLocale): void {
   aisSocket = ws;
 
   ws.on('open', () => {
-    console.log(`Connected to AISStream [${locale.name}]. Sending subscription...`);
     aisConnected = true;
-
-    ws.send(
-      JSON.stringify({
-        APIKey: API_KEY,
-        BoundingBoxes: locale.boundingBoxes,
-        FilterMessageTypes: FILTER_MESSAGE_TYPES,
-      })
-    );
+    const subscription = {
+      APIKey: API_KEY,
+      BoundingBoxes: locale.boundingBoxes,
+      FilterMessageTypes: FILTER_MESSAGE_TYPES,
+    };
+    console.log(`[ais] Connected [${locale.name}]. Subscription:`, JSON.stringify(subscription));
+    ws.send(JSON.stringify(subscription));
 
     broadcast({ type: 'status', connected: true, totalReceived });
   });
 
   ws.on('message', (data) => {
+    // Discard buffered messages from a superseded (locale-switched) socket
+    if (aisSocket !== ws) return;
+
     let raw: unknown;
     try {
       raw = JSON.parse(data.toString());
