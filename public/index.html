@@ -15,7 +15,26 @@
       padding: 16px;
     }
 
-    h1 { color: #ffffff; font-size: 18px; margin-bottom: 12px; }
+    h1 { color: #ffffff; font-size: 18px; }
+
+    #title-row {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 12px;
+    }
+
+    #locale-select {
+      background: #1a1a1a;
+      color: #d4d4d4;
+      border: 1px solid #444;
+      border-radius: 4px;
+      padding: 4px 10px;
+      font-family: monospace;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    #locale-select:focus { outline: none; border-color: #58a6ff; }
 
     #status-bar {
       display: flex;
@@ -113,7 +132,12 @@
 </head>
 <body>
 
-<h1>AIS Viewer</h1>
+<div id="title-row">
+  <h1>AIS Viewer</h1>
+  <select id="locale-select">
+    <!-- populated by JS on load -->
+  </select>
+</div>
 
 <div id="status-bar">
   <span>
@@ -159,13 +183,45 @@
 
 <script>
   const MAX_ROWS = 100;
-  const logBody        = document.getElementById('log-body');
-  const connIndicator  = document.getElementById('conn-indicator');
-  const connText       = document.getElementById('conn-text');
-  const messageCount   = document.getElementById('message-count');
+  const logBody         = document.getElementById('log-body');
+  const connIndicator   = document.getElementById('conn-indicator');
+  const connText        = document.getElementById('conn-text');
+  const messageCount    = document.getElementById('message-count');
   const browserWsStatus = document.getElementById('browser-ws-status');
+  const localeSelect    = document.getElementById('locale-select');
 
   let rowCount = 0;
+
+  // ── Locale selector ──────────────────────────────────────────────────────
+  fetch('/locales')
+    .then((r) => r.json())
+    .then((locales) => {
+      locales.forEach((loc) => {
+        const opt = document.createElement('option');
+        opt.value       = loc.id;
+        opt.textContent = loc.name;
+        localeSelect.appendChild(opt);
+      });
+      // Reflect current server locale
+      fetch('/status').then((r) => r.json()).then((s) => {
+        if (s.localeId) localeSelect.value = s.localeId;
+      });
+    });
+
+  localeSelect.addEventListener('change', () => {
+    const logWaiting = document.createElement('tr');
+    logWaiting.id = 'waiting-row';
+    logWaiting.innerHTML = '<td colspan="17" class="dim" style="padding:12px 8px;">Switching locale — waiting for data…</td>';
+    logBody.innerHTML = '';
+    logBody.appendChild(logWaiting);
+    rowCount = 0;
+
+    fetch('/locale', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ localeId: localeSelect.value }),
+    });
+  });
 
   const nil = '<span class="dim">—</span>';
 

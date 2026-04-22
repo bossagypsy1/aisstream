@@ -9,20 +9,15 @@ import {
   cleanupOldVessels,
   VesselRow,
 } from './db';
+import { LOCALES, DEFAULT_LOCALE, Locale } from './locales';
 
 // ---------------------------------------------------------------------------
-// Configuration — edit these to tune the stream
+// Configuration
 // ---------------------------------------------------------------------------
 
 const PORT = 5000;
 const AISSTREAM_URL = 'wss://stream.aisstream.io/v0/stream';
 const API_KEY = 'ac0083bc3324249a8bc4572aebaf89f1314abb7a';
-
-// Bounding boxes: each box is [[min_lat, min_lon], [max_lat, max_lon]]
-// Add more boxes to cover more areas, or widen/narrow to tune volume.
-const BOUNDING_BOXES: [[number, number], [number, number]][] = [
-  [[49.0, -8.0], [62.0, 2.0]], // UK and surrounding waters
-];
 
 // Message types to subscribe to.
 const FILTER_MESSAGE_TYPES: string[] = [
@@ -123,14 +118,16 @@ const VESSEL_TYPE: Record<number, string> = {
 // Rolling raw message buffer — drives the HTML page table (unchanged behaviour)
 const recentMessages: AISUpdate[] = [];
 
-// Server-side merged vessel state keyed by MMSI — this is the source of truth
-// served to the map frontend. Seeded from Neon on startup.
+// Server-side merged vessel state keyed by MMSI
 const vesselMap = new Map<string, AISUpdate>();
 
+let activeLocale: Locale = DEFAULT_LOCALE;
 let totalReceived = 0;
 let aisConnected = false;
-let rawMessageLog: unknown[] = [];   // stores first 5 raw messages for /debug
+let rawMessageLog: unknown[] = [];
 let rawMessageCount = 0;
+// Reference to the active AISStream WebSocket so we can close it on locale switch
+let aisSocket: WebSocket | null = null;
 
 // ---------------------------------------------------------------------------
 // Merge an incoming AISUpdate into the server-side vessel map
@@ -321,17 +318,72 @@ const httpServer = http.createServer((req, res) => {
     return;
   }
 
-  // /status — returns the server-side merged vessel map to the map frontend.
-  // Each MMSI appears exactly once with its fully merged state.
+  // /status — returns merged vessel map + current locale to the map frontend
   if (req.url === '/status') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(
       JSON.stringify({
         connected:     aisConnected,
         totalReceived,
+        localeId:      activeLocale.id,
         messages:      Array.from(vesselMap.values()),
       })
     );
+    return;
+  }
+
+  // /locales — list of available locales
+  if (req.url === '/locales') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(LOCALES.map(({ id, name, center, zoom }) => ({ id, name, center, zoom }))));
+    return;
+  }
+
+  // POST /locale — switch active locale
+  if (req.url === '/locale' && req.method === 'POST') {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      try {
+        const { localeId } = JSON.parse(body);
+        const next = LOCALES.find((l) => l.id === localeId);
+        if (!next) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: `Unknown locale: ${localeId}` }));
+          return;
+        }
+        if (next.id === activeLocale.id) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, localeId: next.id }));
+          return;
+        }
+
+        console.log(`[locale] Switching from ${activeLocale.name} → ${next.name}`);
+        activeLocale = next;
+
+        // Close existing AIS connection (close handler won't reconnect — see guard above)
+        aisConnected = false;
+        if (aisSocket) { aisSocket.close(); aisSocket = null; }
+
+        // Clear stale vessels from the previous region
+        vesselMap.clear();
+        recentMessages.length = 0;
+        totalReceived = 0;
+        rawMessageLog = [];
+        rawMessageCount = 0;
+
+        broadcast({ type: 'status', connected: false, totalReceived });
+
+        // Reconnect for new locale after a short delay
+        setTimeout(() => connectToAISStream(activeLocale), 500);
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, localeId: next.id }));
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid JSON' }));
+      }
+    });
     return;
   }
 
@@ -384,18 +436,19 @@ wss.on('connection', (socket) => {
 // AISStream WebSocket client
 // ---------------------------------------------------------------------------
 
-function connectToAISStream(): void {
-  console.log('Connecting to AISStream...');
+function connectToAISStream(locale: Locale = activeLocale): void {
+  console.log(`Connecting to AISStream for locale: ${locale.name}...`);
   const ws = new WebSocket(AISSTREAM_URL);
+  aisSocket = ws;
 
   ws.on('open', () => {
-    console.log('Connected to AISStream. Sending subscription...');
+    console.log(`Connected to AISStream [${locale.name}]. Sending subscription...`);
     aisConnected = true;
 
     ws.send(
       JSON.stringify({
         APIKey: API_KEY,
-        BoundingBoxes: BOUNDING_BOXES,
+        BoundingBoxes: locale.boundingBoxes,
         FilterMessageTypes: FILTER_MESSAGE_TYPES,
       })
     );
@@ -443,10 +496,11 @@ function connectToAISStream(): void {
   });
 
   ws.on('close', (code, reason) => {
+    if (aisSocket !== ws) return; // superseded by a locale switch — don't reconnect
     console.log(`AISStream disconnected (${code} ${reason}). Reconnecting in ${RECONNECT_DELAY_MS / 1000}s...`);
     aisConnected = false;
     broadcast({ type: 'status', connected: false, totalReceived });
-    setTimeout(connectToAISStream, RECONNECT_DELAY_MS);
+    setTimeout(() => connectToAISStream(activeLocale), RECONNECT_DELAY_MS);
   });
 
   ws.on('error', (err) => {
@@ -487,8 +541,8 @@ async function start(): Promise<void> {
     console.log(`WebSocket endpoint for browser: ws://localhost:${PORT}`);
   });
 
-  // 5. Connect to AISStream
-  connectToAISStream();
+  // 5. Connect to AISStream using the default locale
+  connectToAISStream(activeLocale);
 }
 
 start().catch((err) => {
