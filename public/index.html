@@ -146,6 +146,7 @@
   </span>
   <span id="message-count">0 messages received</span>
   <span id="browser-ws-status" style="color:#555;">Browser: connecting…</span>
+  <span id="bbox-display" style="color:#555;font-size:11px;">bbox: —</span>
 </div>
 
 <div id="log-header">Recent AIS updates — newest first (max 100 rows)</div>
@@ -189,8 +190,24 @@
   const messageCount    = document.getElementById('message-count');
   const browserWsStatus = document.getElementById('browser-ws-status');
   const localeSelect    = document.getElementById('locale-select');
+  const bboxDisplay     = document.getElementById('bbox-display');
 
   let rowCount = 0;
+
+  function refreshDebug() {
+    fetch('/debug')
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.activeLocale && d.activeLocale.boundingBoxes) {
+          const bb = d.activeLocale.boundingBoxes[0];
+          bboxDisplay.textContent =
+            `bbox: [${bb[0][0]}°N,${bb[0][1]}°E] → [${bb[1][0]}°N,${bb[1][1]}°E]` +
+            ` | raw msgs: ${d.rawMessageCount} | vessels: ${d.vesselCount}`;
+          bboxDisplay.style.color = d.rawMessageCount > 0 ? '#3fb950' : '#e3b341';
+        }
+      })
+      .catch(() => {});
+  }
 
   // ── Locale selector ──────────────────────────────────────────────────────
   fetch('/locales')
@@ -202,11 +219,14 @@
         opt.textContent = loc.name;
         localeSelect.appendChild(opt);
       });
-      // Reflect current server locale
       fetch('/status').then((r) => r.json()).then((s) => {
         if (s.localeId) localeSelect.value = s.localeId;
       });
+      refreshDebug();
     });
+
+  // Refresh debug stats every 5 seconds
+  setInterval(refreshDebug, 5000);
 
   localeSelect.addEventListener('change', () => {
     const logWaiting = document.createElement('tr');
@@ -215,12 +235,14 @@
     logBody.innerHTML = '';
     logBody.appendChild(logWaiting);
     rowCount = 0;
+    bboxDisplay.textContent = 'bbox: switching…';
+    bboxDisplay.style.color = '#555';
 
     fetch('/locale', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ localeId: localeSelect.value }),
-    });
+    }).then(() => setTimeout(refreshDebug, 1000));
   });
 
   const nil = '<span class="dim">—</span>';

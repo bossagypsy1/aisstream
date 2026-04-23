@@ -19,10 +19,11 @@ export const LOCALES: Locale[] = [
     name:         'Senegal Coast',
     center:       [14.5, -17.0],
     zoom:         7,
-    // Wide Atlantic box covering Senegal coast + major offshore shipping lanes.
-    // Extends to 25°W to catch vessels transiting between Europe and South America/South Africa.
-    // UK is at 49–62°N — zero overlap with this 8–22°N band.
-    boundingBoxes: [[[8.0, -25.0], [22.0, -10.0]]],
+    // Box extends from Senegal (8°N) north to the Canary Islands / Morocco coast (32°N)
+    // and well offshore (28°W) to capture Atlantic shipping lanes.
+    // If the Canary Islands band (27-29°N) shows no ships either, the API key
+    // likely has a regional coverage limit for this area.
+    boundingBoxes: [[[8.0, -28.0], [32.0, -8.0]]],
   },
 ];
 
