@@ -6,6 +6,7 @@ import {
   setupSchema,
   upsertVessel,
   loadAllVessels,
+  loadVesselsForLocale,
   cleanupOldVessels,
   VesselRow,
 } from './db';
@@ -136,6 +137,36 @@ let aisSocket: WebSocket | null = null;
 // Tracks the last time each vessel was written to Neon (keyed by MMSI).
 // Used to throttle position-only writes to at most once per 20 minutes.
 const lastDbWrite = new Map<string, number>();
+
+// ---------------------------------------------------------------------------
+// Neon read cache — serves the /vessels endpoint.
+// TTL is short (5 s) so the frontend sees fresh data without hammering Neon.
+// Falls back to vesselMap on Neon unavailability.
+// ---------------------------------------------------------------------------
+
+const NEON_READ_CACHE_TTL_MS = 5_000;
+
+interface NeonReadCache {
+  messages:  AISUpdate[];
+  localeId:  string;
+  fetchedAt: number;
+}
+
+let neonReadCache: NeonReadCache | null = null;
+
+async function getVesselsForFrontend(): Promise<{ messages: AISUpdate[]; localeId: string }> {
+  const now = Date.now();
+  if (neonReadCache && now - neonReadCache.fetchedAt < NEON_READ_CACHE_TTL_MS) {
+    return neonReadCache;
+  }
+  // Try Neon first
+  const rows = await loadVesselsForLocale(activeLocale.name);
+  const messages = rows.length > 0
+    ? rows.map(fromVesselRow)
+    : Array.from(vesselMap.values()).filter((u) => u.latitude != null && u.longitude != null);
+  neonReadCache = { messages, localeId: activeLocale.id, fetchedAt: now };
+  return neonReadCache;
+}
 
 // ---------------------------------------------------------------------------
 // Merge an incoming AISUpdate into the server-side vessel map
@@ -327,6 +358,21 @@ const httpServer = http.createServer((req, res) => {
     return;
   }
 
+  // /vessels — Neon-backed vessel list for the map frontend.
+  // Reads from Neon (5 s cache); falls back to in-memory vesselMap if DB is absent.
+  if (req.url === '/vessels') {
+    getVesselsForFrontend()
+      .then(({ messages, localeId }) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ connected: aisConnected, totalReceived, localeId, messages }));
+      })
+      .catch((err) => {
+        console.error('[/vessels]', (err as Error).message);
+        res.writeHead(500); res.end('Internal error');
+      });
+    return;
+  }
+
   // /status — returns merged vessel map + current locale to the map frontend
   if (req.url === '/status') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -375,13 +421,14 @@ const httpServer = http.createServer((req, res) => {
         aisConnected = false;
         if (aisSocket) { aisSocket.close(); aisSocket = null; }
 
-        // Clear stale vessels from the previous region
+        // Clear stale vessels and caches from the previous region
         vesselMap.clear();
         recentMessages.length = 0;
         totalReceived = 0;
         rawMessageLog = [];
         rawMessageCount = 0;
         lastDbWrite.clear();
+        neonReadCache = null;
 
         broadcast({ type: 'status', connected: false, totalReceived });
 

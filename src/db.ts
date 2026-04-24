@@ -132,33 +132,64 @@ export async function upsertVessel(row: VesselRow): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Load — called on startup to seed in-memory map from DB
+// Shared SELECT columns — keeps both query functions in sync
+// ---------------------------------------------------------------------------
+
+const SELECT_COLUMNS = `
+  mmsi, ship_name, callsign, imo, vessel_type,
+  length_m::float8         AS length_m,
+  width_m::float8          AS width_m,
+  latitude::float8         AS latitude,
+  longitude::float8        AS longitude,
+  speed::float8            AS speed,
+  course::float8           AS course,
+  heading::float8          AS heading,
+  nav_status, draught::float8 AS draught, destination,
+  locale,
+  last_position_at::text   AS last_position_at,
+  last_static_at::text     AS last_static_at,
+  updated_at::text         AS updated_at
+`;
+
+// ---------------------------------------------------------------------------
+// Load all — called on startup to seed the in-memory write buffer from DB
 // ---------------------------------------------------------------------------
 
 export async function loadAllVessels(): Promise<VesselRow[]> {
   if (!pool) return [];
   try {
     const result = await pool.query<VesselRow>(`
-      SELECT
-        mmsi, ship_name, callsign, imo, vessel_type,
-        length_m::float8         AS length_m,
-        width_m::float8          AS width_m,
-        latitude::float8         AS latitude,
-        longitude::float8        AS longitude,
-        speed::float8            AS speed,
-        course::float8           AS course,
-        heading::float8          AS heading,
-        nav_status, draught::float8 AS draught, destination,
-        locale,
-        last_position_at::text   AS last_position_at,
-        last_static_at::text     AS last_static_at,
-        updated_at::text         AS updated_at
+      SELECT ${SELECT_COLUMNS}
       FROM vessels
       WHERE updated_at > NOW() - INTERVAL '24 hours'
     `);
     return result.rows;
   } catch (err) {
     console.error('[db] loadAllVessels error:', (err as Error).message);
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Load by locale — used by the /vessels endpoint (frontend read path)
+// Only returns vessels that have a valid position fix.
+// ---------------------------------------------------------------------------
+
+export async function loadVesselsForLocale(localeName: string): Promise<VesselRow[]> {
+  if (!pool) return [];
+  try {
+    const result = await pool.query<VesselRow>(`
+      SELECT ${SELECT_COLUMNS}
+      FROM vessels
+      WHERE locale = $1
+        AND latitude  IS NOT NULL
+        AND longitude IS NOT NULL
+        AND updated_at > NOW() - INTERVAL '24 hours'
+      ORDER BY updated_at DESC
+    `, [localeName]);
+    return result.rows;
+  } catch (err) {
+    console.error('[db] loadVesselsForLocale error:', (err as Error).message);
     return [];
   }
 }
