@@ -35,6 +35,10 @@ const RECONNECT_DELAY_MS = 5000;
 // How often to run the 24-hour cleanup against Neon (every hour)
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 
+// Minimum gap between position-triggered DB writes per vessel (20 minutes).
+// Static data (ShipStaticData) always bypasses this throttle.
+const POSITION_WRITE_THROTTLE_MS = 20 * 60 * 1000;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -129,6 +133,10 @@ let rawMessageCount = 0;
 // Reference to the active AISStream WebSocket so we can close it on locale switch
 let aisSocket: WebSocket | null = null;
 
+// Tracks the last time each vessel was written to Neon (keyed by MMSI).
+// Used to throttle position-only writes to at most once per 20 minutes.
+const lastDbWrite = new Map<string, number>();
+
 // ---------------------------------------------------------------------------
 // Merge an incoming AISUpdate into the server-side vessel map
 // ---------------------------------------------------------------------------
@@ -170,7 +178,7 @@ function mergeIntoVesselMap(u: AISUpdate): void {
 // Convert AISUpdate ↔ VesselRow (for Neon persistence)
 // ---------------------------------------------------------------------------
 
-function toVesselRow(u: AISUpdate): VesselRow {
+function toVesselRow(u: AISUpdate, localeName: string): VesselRow {
   const isPosition = u.latitude != null && u.longitude != null;
   const isStatic   = u.messageType === 'ShipStaticData';
   return {
@@ -189,6 +197,7 @@ function toVesselRow(u: AISUpdate): VesselRow {
     nav_status:       u.navStatus,
     draught:          u.draught,
     destination:      u.destination,
+    locale:           localeName,
     last_position_at: isPosition ? u.timestamp : null,
     last_static_at:   isStatic   ? u.timestamp : null,
     updated_at:       u.timestamp,
@@ -372,6 +381,7 @@ const httpServer = http.createServer((req, res) => {
         totalReceived = 0;
         rawMessageLog = [];
         rawMessageCount = 0;
+        lastDbWrite.clear();
 
         broadcast({ type: 'status', connected: false, totalReceived });
 
@@ -501,8 +511,19 @@ function connectToAISStream(locale: Locale = activeLocale): void {
     // 2. Merge into server-side vessel map (source of truth for the map frontend)
     mergeIntoVesselMap(update);
 
-    // 3. Persist merged state to Neon (fire-and-forget, non-blocking)
-    upsertVessel(toVesselRow(vesselMap.get(update.mmsi)!)).catch(() => {/* already logged in db.ts */});
+    // 3. Persist merged state to Neon — throttled by message type:
+    //    • ShipStaticData  → always write (static fields must never be lost)
+    //    • Position report → at most once per 20 minutes per vessel
+    const merged    = vesselMap.get(update.mmsi)!;
+    const isStatic  = update.messageType === 'ShipStaticData';
+    const nowMs     = Date.now();
+    const lastWrite = lastDbWrite.get(update.mmsi) ?? 0;
+    const dueForPositionWrite = nowMs - lastWrite >= POSITION_WRITE_THROTTLE_MS;
+
+    if (isStatic || dueForPositionWrite) {
+      upsertVessel(toVesselRow(merged, activeLocale.name)).catch(() => {/* already logged in db.ts */});
+      lastDbWrite.set(update.mmsi, nowMs);
+    }
 
     broadcast({ type: 'update', update, totalReceived });
   });

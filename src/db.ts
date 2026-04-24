@@ -34,6 +34,7 @@ export interface VesselRow {
   nav_status:       string | null;
   draught:          number | null;
   destination:      string | null;
+  locale:           string | null;   // e.g. "United Kingdom", "Persian Gulf"
   last_position_at: string | null;
   last_static_at:   string | null;
   updated_at:       string;
@@ -63,11 +64,15 @@ export async function setupSchema(): Promise<void> {
         nav_status       TEXT,
         draught          NUMERIC,
         destination      TEXT,
+        locale           TEXT,
         last_position_at TIMESTAMPTZ,
         last_static_at   TIMESTAMPTZ,
         updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
       CREATE INDEX IF NOT EXISTS vessels_updated_at_idx ON vessels(updated_at);
+
+      -- Add locale column if upgrading from an older schema
+      ALTER TABLE vessels ADD COLUMN IF NOT EXISTS locale TEXT;
     `);
     console.log('[db] Schema ready');
   } catch (err) {
@@ -76,7 +81,8 @@ export async function setupSchema(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Upsert — COALESCE ensures good values are never overwritten with null
+// Upsert — COALESCE ensures good values are never overwritten with null.
+// locale always takes the latest value (vessel moves to current active region).
 // ---------------------------------------------------------------------------
 
 export async function upsertVessel(row: VesselRow): Promise<void> {
@@ -88,9 +94,10 @@ export async function upsertVessel(row: VesselRow): Promise<void> {
         length_m, width_m,
         latitude, longitude, speed, course, heading,
         nav_status, draught, destination,
+        locale,
         last_position_at, last_static_at, updated_at
       ) VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW()
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,NOW()
       )
       ON CONFLICT (mmsi) DO UPDATE SET
         ship_name        = COALESCE(EXCLUDED.ship_name,        vessels.ship_name),
@@ -107,6 +114,7 @@ export async function upsertVessel(row: VesselRow): Promise<void> {
         nav_status       = COALESCE(EXCLUDED.nav_status,       vessels.nav_status),
         draught          = COALESCE(EXCLUDED.draught,          vessels.draught),
         destination      = COALESCE(EXCLUDED.destination,      vessels.destination),
+        locale           = EXCLUDED.locale,
         last_position_at = COALESCE(EXCLUDED.last_position_at, vessels.last_position_at),
         last_static_at   = COALESCE(EXCLUDED.last_static_at,   vessels.last_static_at),
         updated_at       = NOW()
@@ -115,6 +123,7 @@ export async function upsertVessel(row: VesselRow): Promise<void> {
       row.length_m, row.width_m,
       row.latitude, row.longitude, row.speed, row.course, row.heading,
       row.nav_status, row.draught, row.destination,
+      row.locale,
       row.last_position_at, row.last_static_at,
     ]);
   } catch (err) {
@@ -140,6 +149,7 @@ export async function loadAllVessels(): Promise<VesselRow[]> {
         course::float8           AS course,
         heading::float8          AS heading,
         nav_status, draught::float8 AS draught, destination,
+        locale,
         last_position_at::text   AS last_position_at,
         last_static_at::text     AS last_static_at,
         updated_at::text         AS updated_at
