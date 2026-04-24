@@ -25,6 +25,16 @@ export const LOCALES: Locale[] = [
     // likely has a regional coverage limit for this area.
     boundingBoxes: [[[8.0, -28.0], [32.0, -8.0]]],
   },
+  {
+    id:           'persian_gulf',
+    name:         'Persian Gulf',
+    center:       [26.0, 52.0],
+    zoom:         7,
+    // Covers the full Persian Gulf from the Strait of Hormuz (22°N, 57°E)
+    // north-west to Kuwait / Iraq (30.5°N, 48°E) — one of the world's
+    // busiest tanker corridors.
+    boundingBoxes: [[[22.0, 48.0], [30.5, 57.0]]],
+  },
 ];
 
 export const DEFAULT_LOCALE = LOCALES[0];
