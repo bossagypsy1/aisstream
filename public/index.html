@@ -137,6 +137,7 @@
   <select id="locale-select">
     <!-- populated by JS on load -->
   </select>
+  <span id="bbox-title" style="color:#555;font-size:11px;font-family:monospace;letter-spacing:0.02em;">—</span>
 </div>
 
 <div id="status-bar">
@@ -191,18 +192,29 @@
   const browserWsStatus = document.getElementById('browser-ws-status');
   const localeSelect    = document.getElementById('locale-select');
   const bboxDisplay     = document.getElementById('bbox-display');
+  const bboxTitle       = document.getElementById('bbox-title');
 
   let rowCount = 0;
+
+  function fmtCoord(lat, lon) {
+    return `${Math.abs(lat)}°${lat >= 0 ? 'N' : 'S'} ${Math.abs(lon)}°${lon >= 0 ? 'E' : 'W'}`;
+  }
+
+  function fmtBBox(bb) {
+    return `${fmtCoord(bb[0][0], bb[0][1])} → ${fmtCoord(bb[1][0], bb[1][1])}`;
+  }
 
   function refreshDebug() {
     fetch('/debug')
       .then((r) => r.json())
       .then((d) => {
         if (d.activeLocale && d.activeLocale.boundingBoxes) {
-          const bb = d.activeLocale.boundingBoxes[0];
+          const bb    = d.activeLocale.boundingBoxes[0];
+          const bbStr = fmtBBox(bb);
+          bboxTitle.textContent       = bbStr;
+          bboxTitle.style.color       = '#888';
           bboxDisplay.textContent =
-            `bbox: [${bb[0][0]}°N,${bb[0][1]}°E] → [${bb[1][0]}°N,${bb[1][1]}°E]` +
-            ` | raw msgs: ${d.rawMessageCount} | vessels: ${d.vesselCount}`;
+            `bbox: ${bbStr} | raw msgs: ${d.rawMessageCount} | vessels: ${d.vesselCount}`;
           bboxDisplay.style.color = d.rawMessageCount > 0 ? '#3fb950' : '#e3b341';
         }
       })
@@ -237,6 +249,8 @@
     rowCount = 0;
     bboxDisplay.textContent = 'bbox: switching…';
     bboxDisplay.style.color = '#555';
+    bboxTitle.textContent   = 'switching…';
+    bboxTitle.style.color   = '#555';
 
     fetch('/locale', {
       method:  'POST',
