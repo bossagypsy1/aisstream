@@ -258,6 +258,20 @@ function fromVesselRow(r: VesselRow): AISUpdate {
 }
 
 // ---------------------------------------------------------------------------
+// Normalise the Go-style AISStream timestamp into ISO 8601 for Postgres.
+// Input:  "2026-04-25 00:05:39.004682189 +0000 UTC"
+// Output: "2026-04-25T00:05:39.004Z"
+// ---------------------------------------------------------------------------
+
+function normaliseTimestamp(ts: string): string {
+  return ts
+    .replace(' ', 'T')                       // date/time separator
+    .replace(/(\.\d{3})\d*/, '$1')           // truncate sub-ms precision
+    .replace(/\s+\+0000\s+UTC$/, 'Z')        // "+0000 UTC" → "Z"
+    .replace(/\s+\+0000$/, 'Z');             // "+0000" → "Z" (fallback)
+}
+
+// ---------------------------------------------------------------------------
 // Parse a raw AISStream JSON message into an AISUpdate
 // ---------------------------------------------------------------------------
 
@@ -280,8 +294,9 @@ function parseAISMessage(raw: any): AISUpdate | null {
     }
 
     const shipName: string = (meta.ShipName ?? body?.Name ?? '').trim() || '—';
-    const timestamp: string =
-      typeof meta.time_utc === 'string' ? meta.time_utc : new Date().toISOString();
+    const timestamp: string = typeof meta.time_utc === 'string'
+      ? normaliseTimestamp(meta.time_utc)
+      : new Date().toISOString();
 
     // ── ShipStaticData — no position, but rich vessel metadata ────────────────
     if (messageType === 'ShipStaticData') {
