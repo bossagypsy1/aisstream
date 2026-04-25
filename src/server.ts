@@ -159,11 +159,8 @@ async function getVesselsForFrontend(): Promise<{ messages: AISUpdate[]; localeI
   if (neonReadCache && now - neonReadCache.fetchedAt < NEON_READ_CACHE_TTL_MS) {
     return neonReadCache;
   }
-  // Try Neon first
   const rows = await loadVesselsForLocale(activeLocale.name);
-  const messages = rows.length > 0
-    ? rows.map(fromVesselRow)
-    : Array.from(vesselMap.values()).filter((u) => u.latitude != null && u.longitude != null);
+  const messages = rows.map(fromVesselRow);
   neonReadCache = { messages, localeId: activeLocale.id, fetchedAt: now };
   return neonReadCache;
 }
