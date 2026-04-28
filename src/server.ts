@@ -4,9 +4,8 @@ import * as path from 'path';
 import WebSocket, { WebSocketServer } from 'ws';
 import {
   setupSchema,
-  upsertVessel,
+  upsertVessels,
   loadAllVessels,
-  loadVesselsForLocale,
   cleanupOldVessels,
   VesselRow,
 } from './db';
@@ -37,8 +36,12 @@ const RECONNECT_DELAY_MS = 5000;
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 
 // Minimum gap between position-triggered DB writes per vessel (20 minutes).
-// Static data (ShipStaticData) always bypasses this throttle.
+// Static data (ShipStaticData) is persisted once per MMSI.
 const POSITION_WRITE_THROTTLE_MS = 20 * 60 * 1000;
+
+// Flush dirty vessel rows in bulk to reduce Neon network overhead.
+const DB_WRITE_BATCH_SIZE = 100;
+const DB_WRITE_FLUSH_INTERVAL_MS = 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -125,6 +128,7 @@ const recentMessages: AISUpdate[] = [];
 
 // Server-side merged vessel state keyed by MMSI
 const vesselMap = new Map<string, AISUpdate>();
+const vesselLocale = new Map<string, string>();
 
 let activeLocale: Locale = DEFAULT_LOCALE;
 let totalReceived = 0;
@@ -138,31 +142,78 @@ let aisSocket: WebSocket | null = null;
 // Used to throttle position-only writes to at most once per 20 minutes.
 const lastDbWrite = new Map<string, number>();
 
+// Tracks vessels whose ShipStaticData has already been persisted.
+// Static AIS messages are repetitive; write them only once per MMSI.
+const staticDataWritten = new Set<string>();
+
 // ---------------------------------------------------------------------------
-// Neon read cache — serves the /vessels endpoint.
-// TTL is short (5 s) so the frontend sees fresh data without hammering Neon.
-// Falls back to vesselMap on Neon unavailability.
+// Frontend read path — serves live in-memory state hydrated from Neon at startup
+// and updated continuously by the AIS stream.
 // ---------------------------------------------------------------------------
 
-const NEON_READ_CACHE_TTL_MS = 5_000;
-
-interface NeonReadCache {
-  messages:  AISUpdate[];
-  localeId:  string;
-  fetchedAt: number;
+function getVesselsForFrontend(): AISUpdate[] {
+  return Array.from(vesselMap.entries())
+    .filter(([, vessel]) => (
+      vesselLocale.get(vessel.mmsi) === activeLocale.name &&
+      vessel.latitude != null &&
+      vessel.longitude != null
+    ))
+    .map(([, vessel]) => vessel);
 }
 
-let neonReadCache: NeonReadCache | null = null;
+// ---------------------------------------------------------------------------
+// Batched Neon persistence
+// ---------------------------------------------------------------------------
 
-async function getVesselsForFrontend(): Promise<{ messages: AISUpdate[]; localeId: string }> {
-  const now = Date.now();
-  if (neonReadCache && now - neonReadCache.fetchedAt < NEON_READ_CACHE_TTL_MS) {
-    return neonReadCache;
+const pendingDbWrites = new Map<string, VesselRow>();
+let flushInFlight = false;
+
+function mergeQueuedRow(prev: VesselRow, next: VesselRow): VesselRow {
+  return {
+    mmsi:             next.mmsi,
+    ship_name:        next.ship_name        ?? prev.ship_name,
+    callsign:         next.callsign         ?? prev.callsign,
+    imo:              next.imo              ?? prev.imo,
+    vessel_type:      next.vessel_type      ?? prev.vessel_type,
+    length_m:         next.length_m         ?? prev.length_m,
+    width_m:          next.width_m          ?? prev.width_m,
+    latitude:         next.latitude         ?? prev.latitude,
+    longitude:        next.longitude        ?? prev.longitude,
+    speed:            next.speed            ?? prev.speed,
+    course:           next.course           ?? prev.course,
+    heading:          next.heading          ?? prev.heading,
+    nav_status:       next.nav_status       ?? prev.nav_status,
+    draught:          next.draught          ?? prev.draught,
+    destination:      next.destination      ?? prev.destination,
+    locale:           next.locale           ?? prev.locale,
+    last_position_at: next.last_position_at ?? prev.last_position_at,
+    last_static_at:   next.last_static_at   ?? prev.last_static_at,
+    updated_at:       next.updated_at,
+  };
+}
+
+function queueDbWrite(row: VesselRow): void {
+  const prev = pendingDbWrites.get(row.mmsi);
+  pendingDbWrites.set(row.mmsi, prev ? mergeQueuedRow(prev, row) : row);
+  if (pendingDbWrites.size >= DB_WRITE_BATCH_SIZE) {
+    void flushPendingDbWrites();
   }
-  const rows = await loadVesselsForLocale(activeLocale.name);
-  const messages = rows.map(fromVesselRow);
-  neonReadCache = { messages, localeId: activeLocale.id, fetchedAt: now };
-  return neonReadCache;
+}
+
+async function flushPendingDbWrites(): Promise<void> {
+  if (flushInFlight || pendingDbWrites.size === 0) return;
+
+  flushInFlight = true;
+  const rows = Array.from(pendingDbWrites.values()).slice(0, DB_WRITE_BATCH_SIZE);
+
+  try {
+    await upsertVessels(rows);
+    rows.forEach((row) => pendingDbWrites.delete(row.mmsi));
+  } catch {
+    // Keep pending rows queued; the interval will retry.
+  } finally {
+    flushInFlight = false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -206,9 +257,11 @@ function mergeIntoVesselMap(u: AISUpdate): void {
 // Convert AISUpdate ↔ VesselRow (for Neon persistence)
 // ---------------------------------------------------------------------------
 
-function toVesselRow(u: AISUpdate, localeName: string): VesselRow {
-  const isPosition = u.latitude != null && u.longitude != null;
-  const isStatic   = u.messageType === 'ShipStaticData';
+function toVesselRow(
+  u: AISUpdate,
+  localeName: string,
+  writeKind: 'position' | 'static',
+): VesselRow {
   return {
     mmsi:             u.mmsi,
     ship_name:        (u.shipName && u.shipName !== '—') ? u.shipName : null,
@@ -226,8 +279,8 @@ function toVesselRow(u: AISUpdate, localeName: string): VesselRow {
     draught:          u.draught,
     destination:      u.destination,
     locale:           localeName,
-    last_position_at: isPosition ? u.timestamp : null,
-    last_static_at:   isStatic   ? u.timestamp : null,
+    last_position_at: writeKind === 'position' ? u.timestamp : null,
+    last_static_at:   writeKind === 'static'   ? u.timestamp : null,
     updated_at:       u.timestamp,
   };
 }
@@ -370,18 +423,16 @@ const httpServer = http.createServer((req, res) => {
     return;
   }
 
-  // /vessels — Neon-backed vessel list for the map frontend.
-  // Reads from Neon (5 s cache); falls back to in-memory vesselMap if DB is absent.
+  // /vessels — in-memory vessel list for the map frontend.
+  // Neon is used for startup hydration and batched persistence, not live reads.
   if (req.url === '/vessels') {
-    getVesselsForFrontend()
-      .then(({ messages, localeId }) => {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ connected: aisConnected, totalReceived, localeId, messages }));
-      })
-      .catch((err) => {
-        console.error('[/vessels]', (err as Error).message);
-        res.writeHead(500); res.end('Internal error');
-      });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      connected: aisConnected,
+      totalReceived,
+      localeId:  activeLocale.id,
+      messages:  getVesselsForFrontend(),
+    }));
     return;
   }
 
@@ -410,7 +461,7 @@ const httpServer = http.createServer((req, res) => {
   if (req.url === '/locale' && req.method === 'POST') {
     let body = '';
     req.on('data', (chunk) => { body += chunk; });
-    req.on('end', () => {
+    req.on('end', async () => {
       try {
         const { localeId } = JSON.parse(body);
         const next = LOCALES.find((l) => l.id === localeId);
@@ -434,13 +485,14 @@ const httpServer = http.createServer((req, res) => {
         if (aisSocket) { aisSocket.close(); aisSocket = null; }
 
         // Clear stale vessels and caches from the previous region
+        await flushPendingDbWrites();
         vesselMap.clear();
+        vesselLocale.clear();
         recentMessages.length = 0;
         totalReceived = 0;
         rawMessageLog = [];
         rawMessageCount = 0;
         lastDbWrite.clear();
-        neonReadCache = null;
 
         broadcast({ type: 'status', connected: false, totalReceived });
 
@@ -569,18 +621,25 @@ function connectToAISStream(locale: Locale = activeLocale): void {
 
     // 2. Merge into server-side vessel map (source of truth for the map frontend)
     mergeIntoVesselMap(update);
+    vesselLocale.set(update.mmsi, activeLocale.name);
 
     // 3. Persist merged state to Neon — throttled by message type:
-    //    • ShipStaticData  → always write (static fields must never be lost)
+    //    • ShipStaticData  → once per MMSI only
     //    • Position report → at most once per 20 minutes per vessel
     const merged    = vesselMap.get(update.mmsi)!;
     const isStatic  = update.messageType === 'ShipStaticData';
     const nowMs     = Date.now();
     const lastWrite = lastDbWrite.get(update.mmsi) ?? 0;
+    const shouldWriteStatic = isStatic && !staticDataWritten.has(update.mmsi);
     const dueForPositionWrite = nowMs - lastWrite >= POSITION_WRITE_THROTTLE_MS;
 
-    if (isStatic || dueForPositionWrite) {
-      upsertVessel(toVesselRow(merged, activeLocale.name)).catch(() => {/* already logged in db.ts */});
+    if (shouldWriteStatic) {
+      staticDataWritten.add(update.mmsi);
+      queueDbWrite(toVesselRow(merged, activeLocale.name, 'static'));
+    }
+
+    if (!isStatic && dueForPositionWrite) {
+      queueDbWrite(toVesselRow(merged, activeLocale.name, 'position'));
       lastDbWrite.set(update.mmsi, nowMs);
     }
 
@@ -612,6 +671,8 @@ async function start(): Promise<void> {
   const rows = await loadAllVessels();
   for (const row of rows) {
     vesselMap.set(row.mmsi, fromVesselRow(row));
+    if (row.locale) vesselLocale.set(row.mmsi, row.locale);
+    if (row.last_static_at) staticDataWritten.add(row.mmsi);
   }
   if (rows.length > 0) {
     console.log(`[db] Loaded ${rows.length} vessel(s) from Neon into memory`);
@@ -627,17 +688,35 @@ async function start(): Promise<void> {
     }
   }, CLEANUP_INTERVAL_MS);
 
-  // 4. Start HTTP server
+  // 4. Flush dirty vessel rows to Neon in batches.
+  setInterval(() => {
+    void flushPendingDbWrites();
+  }, DB_WRITE_FLUSH_INTERVAL_MS);
+
+  // 5. Start HTTP server
   httpServer.listen(PORT, () => {
     console.log(`AIS Viewer running at http://localhost:${PORT}`);
     console.log(`WebSocket endpoint for browser: ws://localhost:${PORT}`);
   });
 
-  // 5. Connect to AISStream using the default locale
+  // 6. Connect to AISStream using the default locale
   connectToAISStream(activeLocale);
 }
 
 start().catch((err) => {
   console.error('Fatal startup error:', err);
   process.exit(1);
+});
+
+async function shutdown(): Promise<void> {
+  await flushPendingDbWrites();
+  process.exit(0);
+}
+
+process.on('SIGINT', () => {
+  void shutdown();
+});
+
+process.on('SIGTERM', () => {
+  void shutdown();
 });

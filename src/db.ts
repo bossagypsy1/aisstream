@@ -131,6 +131,59 @@ export async function upsertVessel(row: VesselRow): Promise<void> {
   }
 }
 
+export async function upsertVessels(rows: VesselRow[]): Promise<void> {
+  if (!pool || rows.length === 0) return;
+
+  const values: unknown[] = [];
+  const placeholders = rows.map((row, rowIndex) => {
+    const offset = rowIndex * 18;
+    values.push(
+      row.mmsi, row.ship_name, row.callsign, row.imo, row.vessel_type,
+      row.length_m, row.width_m,
+      row.latitude, row.longitude, row.speed, row.course, row.heading,
+      row.nav_status, row.draught, row.destination,
+      row.locale,
+      row.last_position_at, row.last_static_at,
+    );
+    return `(${Array.from({ length: 18 }, (_, i) => `$${offset + i + 1}`).join(',')},NOW())`;
+  }).join(',');
+
+  try {
+    await pool.query(`
+      INSERT INTO vessels (
+        mmsi, ship_name, callsign, imo, vessel_type,
+        length_m, width_m,
+        latitude, longitude, speed, course, heading,
+        nav_status, draught, destination,
+        locale,
+        last_position_at, last_static_at, updated_at
+      ) VALUES ${placeholders}
+      ON CONFLICT (mmsi) DO UPDATE SET
+        ship_name        = COALESCE(EXCLUDED.ship_name,        vessels.ship_name),
+        callsign         = COALESCE(EXCLUDED.callsign,         vessels.callsign),
+        imo              = COALESCE(EXCLUDED.imo,              vessels.imo),
+        vessel_type      = COALESCE(EXCLUDED.vessel_type,      vessels.vessel_type),
+        length_m         = COALESCE(EXCLUDED.length_m,         vessels.length_m),
+        width_m          = COALESCE(EXCLUDED.width_m,          vessels.width_m),
+        latitude         = COALESCE(EXCLUDED.latitude,         vessels.latitude),
+        longitude        = COALESCE(EXCLUDED.longitude,        vessels.longitude),
+        speed            = COALESCE(EXCLUDED.speed,            vessels.speed),
+        course           = COALESCE(EXCLUDED.course,           vessels.course),
+        heading          = COALESCE(EXCLUDED.heading,          vessels.heading),
+        nav_status       = COALESCE(EXCLUDED.nav_status,       vessels.nav_status),
+        draught          = COALESCE(EXCLUDED.draught,          vessels.draught),
+        destination      = COALESCE(EXCLUDED.destination,      vessels.destination),
+        locale           = EXCLUDED.locale,
+        last_position_at = COALESCE(EXCLUDED.last_position_at, vessels.last_position_at),
+        last_static_at   = COALESCE(EXCLUDED.last_static_at,   vessels.last_static_at),
+        updated_at       = NOW()
+    `, values);
+  } catch (err) {
+    console.error('[db] upsertVessels error:', (err as Error).message);
+    throw err;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Shared SELECT columns — keeps both query functions in sync
 // ---------------------------------------------------------------------------
@@ -171,7 +224,8 @@ export async function loadAllVessels(): Promise<VesselRow[]> {
 }
 
 // ---------------------------------------------------------------------------
-// Load by locale — used by the /vessels endpoint (frontend read path)
+// Load by locale — available for diagnostics/backfills.
+// The dashboard /vessels path is served from aisstream memory, not Neon.
 // Only returns vessels that have a valid position fix.
 // ---------------------------------------------------------------------------
 
