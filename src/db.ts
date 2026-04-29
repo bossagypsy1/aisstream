@@ -40,6 +40,33 @@ export interface VesselRow {
   updated_at:       string;
 }
 
+export interface MpaRow {
+  mpa_id:           string;
+  name:             string;
+  designation_type: string;
+  source:           string;
+  status:           string | null;
+  metadata:         Record<string, unknown>;
+}
+
+export interface GeoJsonGeometry {
+  type: string;
+  coordinates: unknown;
+}
+
+export interface GeoJsonFeature {
+  type: 'Feature';
+  id: string;
+  geometry: GeoJsonGeometry;
+  properties: {
+    name: string;
+    designationType: string;
+    source: string;
+    status: string | null;
+    metadata: Record<string, unknown>;
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Schema setup (run once on startup)
 // ---------------------------------------------------------------------------
@@ -48,6 +75,8 @@ export async function setupSchema(): Promise<void> {
   if (!pool) return;
   try {
     await pool.query(`
+      CREATE EXTENSION IF NOT EXISTS postgis;
+
       CREATE TABLE IF NOT EXISTS vessels (
         mmsi             TEXT PRIMARY KEY,
         ship_name        TEXT,
@@ -67,12 +96,35 @@ export async function setupSchema(): Promise<void> {
         locale           TEXT,
         last_position_at TIMESTAMPTZ,
         last_static_at   TIMESTAMPTZ,
+        geom             geometry(Point, 4326),
         updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
       CREATE INDEX IF NOT EXISTS vessels_updated_at_idx ON vessels(updated_at);
+      CREATE INDEX IF NOT EXISTS vessels_geom_gist_idx ON vessels USING GIST (geom);
 
       -- Add locale column if upgrading from an older schema
       ALTER TABLE vessels ADD COLUMN IF NOT EXISTS locale TEXT;
+      ALTER TABLE vessels ADD COLUMN IF NOT EXISTS geom geometry(Point, 4326);
+
+      UPDATE vessels
+      SET geom = ST_SetSRID(ST_MakePoint(longitude::double precision, latitude::double precision), 4326)
+      WHERE geom IS NULL
+        AND latitude IS NOT NULL
+        AND longitude IS NOT NULL;
+
+      CREATE TABLE IF NOT EXISTS mpas (
+        mpa_id             TEXT PRIMARY KEY,
+        name               TEXT NOT NULL,
+        designation_type   TEXT NOT NULL,
+        source             TEXT NOT NULL,
+        status             TEXT,
+        metadata           JSONB NOT NULL DEFAULT '{}'::jsonb,
+        geom               geometry(MultiPolygon, 4326) NOT NULL,
+        updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS mpas_geom_gist_idx ON mpas USING GIST (geom);
+      CREATE INDEX IF NOT EXISTS mpas_designation_type_idx ON mpas (designation_type);
+      CREATE INDEX IF NOT EXISTS mpas_source_idx ON mpas (source);
     `);
     console.log('[db] Schema ready');
   } catch (err) {
@@ -85,6 +137,14 @@ export async function setupSchema(): Promise<void> {
 // locale always takes the latest value (vessel moves to current active region).
 // ---------------------------------------------------------------------------
 
+function geomSql(latRef: string, lonRef: string, fallback = 'NULL'): string {
+  return `CASE
+    WHEN ${latRef} IS NOT NULL AND ${lonRef} IS NOT NULL
+      THEN ST_SetSRID(ST_MakePoint(${lonRef}::double precision, ${latRef}::double precision), 4326)
+    ELSE ${fallback}
+  END`;
+}
+
 export async function upsertVessel(row: VesselRow): Promise<void> {
   if (!pool) return;
   try {
@@ -95,9 +155,9 @@ export async function upsertVessel(row: VesselRow): Promise<void> {
         latitude, longitude, speed, course, heading,
         nav_status, draught, destination,
         locale,
-        last_position_at, last_static_at, updated_at
+        last_position_at, last_static_at, geom, updated_at
       ) VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,NOW()
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,${geomSql('$8', '$9')},NOW()
       )
       ON CONFLICT (mmsi) DO UPDATE SET
         ship_name        = COALESCE(EXCLUDED.ship_name,        vessels.ship_name),
@@ -117,6 +177,7 @@ export async function upsertVessel(row: VesselRow): Promise<void> {
         locale           = EXCLUDED.locale,
         last_position_at = COALESCE(EXCLUDED.last_position_at, vessels.last_position_at),
         last_static_at   = COALESCE(EXCLUDED.last_static_at,   vessels.last_static_at),
+        geom             = ${geomSql('EXCLUDED.latitude', 'EXCLUDED.longitude', 'vessels.geom')},
         updated_at       = NOW()
     `, [
       row.mmsi, row.ship_name, row.callsign, row.imo, row.vessel_type,
@@ -145,7 +206,8 @@ export async function upsertVessels(rows: VesselRow[]): Promise<void> {
       row.locale,
       row.last_position_at, row.last_static_at,
     );
-    return `(${Array.from({ length: 18 }, (_, i) => `$${offset + i + 1}`).join(',')},NOW())`;
+    const geomExpr = geomSql(`$${offset + 8}`, `$${offset + 9}`);
+    return `(${Array.from({ length: 18 }, (_, i) => `$${offset + i + 1}`).join(',')},${geomExpr},NOW())`;
   }).join(',');
 
   try {
@@ -156,7 +218,7 @@ export async function upsertVessels(rows: VesselRow[]): Promise<void> {
         latitude, longitude, speed, course, heading,
         nav_status, draught, destination,
         locale,
-        last_position_at, last_static_at, updated_at
+        last_position_at, last_static_at, geom, updated_at
       ) VALUES ${placeholders}
       ON CONFLICT (mmsi) DO UPDATE SET
         ship_name        = COALESCE(EXCLUDED.ship_name,        vessels.ship_name),
@@ -176,6 +238,7 @@ export async function upsertVessels(rows: VesselRow[]): Promise<void> {
         locale           = EXCLUDED.locale,
         last_position_at = COALESCE(EXCLUDED.last_position_at, vessels.last_position_at),
         last_static_at   = COALESCE(EXCLUDED.last_static_at,   vessels.last_static_at),
+        geom             = ${geomSql('EXCLUDED.latitude', 'EXCLUDED.longitude', 'vessels.geom')},
         updated_at       = NOW()
     `, values);
   } catch (err) {
@@ -262,5 +325,100 @@ export async function cleanupOldVessels(): Promise<number> {
   } catch (err) {
     console.error('[db] cleanupOldVessels error:', (err as Error).message);
     return 0;
+  }
+}
+
+export async function upsertMpas(rows: Array<MpaRow & { geometry: GeoJsonGeometry }>): Promise<void> {
+  if (!pool || rows.length === 0) return;
+
+  const batchSize = 1;
+
+  try {
+    for (let i = 0; i < rows.length; i += batchSize) {
+      const batch = rows.slice(i, i + batchSize);
+      const values: unknown[] = [];
+      const placeholders = batch.map((row, rowIndex) => {
+        const offset = rowIndex * 7;
+        values.push(
+          row.mpa_id,
+          row.name,
+          row.designation_type,
+          row.source,
+          row.status,
+          JSON.stringify(row.metadata ?? {}),
+          JSON.stringify(row.geometry),
+        );
+        return `(
+          $${offset + 1},
+          $${offset + 2},
+          $${offset + 3},
+          $${offset + 4},
+          $${offset + 5},
+          $${offset + 6}::jsonb,
+          ST_Multi(ST_CollectionExtract(ST_SetSRID(ST_GeomFromGeoJSON($${offset + 7}), 4326), 3)),
+          NOW()
+        )`;
+      }).join(',');
+
+      await pool.query(`
+        INSERT INTO mpas (
+          mpa_id, name, designation_type, source, status, metadata, geom, updated_at
+        ) VALUES ${placeholders}
+        ON CONFLICT (mpa_id) DO UPDATE SET
+          name             = EXCLUDED.name,
+          designation_type  = EXCLUDED.designation_type,
+          source            = EXCLUDED.source,
+          status            = EXCLUDED.status,
+          metadata          = EXCLUDED.metadata,
+          geom              = EXCLUDED.geom,
+          updated_at        = NOW()
+      `, values);
+    }
+  } catch (err) {
+    console.error('[db] upsertMpas error:', (err as Error).message);
+    throw err;
+  }
+}
+
+export async function loadMpasForLocale(localeId: string): Promise<GeoJsonFeature[]> {
+  if (!pool) return [];
+  if (localeId !== 'uk') return [];
+
+  try {
+    const result = await pool.query<{
+      mpa_id: string;
+      name: string;
+      designation_type: string;
+      source: string;
+      status: string | null;
+      metadata: Record<string, unknown>;
+      geometry: GeoJsonGeometry;
+    }>(`
+      SELECT
+        mpa_id,
+        name,
+        designation_type,
+        source,
+        status,
+        metadata,
+        ST_AsGeoJSON(ST_SimplifyPreserveTopology(geom, 0.01), 6)::json AS geometry
+      FROM mpas
+    `);
+
+    return result.rows.map((row) => ({
+      type: 'Feature',
+      id: row.mpa_id,
+      geometry: row.geometry,
+      properties: {
+        name: row.name,
+        designationType: row.designation_type,
+        source: row.source,
+        status: row.status,
+        metadata: row.metadata ?? {},
+      },
+    }));
+  } catch (err) {
+    console.error('[db] loadMpasForLocale error:', (err as Error).message);
+    return [];
   }
 }

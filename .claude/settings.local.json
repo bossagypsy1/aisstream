@@ -9,10 +9,10 @@
       "Bash(\"/c/Program Files/nodejs/npm.cmd\" install)",
       "Bash('/c/Program Files/nodejs/npm.cmd' install)",
       "Bash('/c/Program Files/nodejs/npm.cmd' start)",
-      "Bash(curl -s http://localhost:3001/debug)",
+      "Bash(curl -s http://localhost:5000/debug)",
       "Bash(nohup '/c/Program Files/nodejs/node_modules/tsx/dist/cli.mjs' src/server.ts)",
       "Bash(echo \"PID: $!\")",
-      "Bash(curl -s http://localhost:3001/status)"
+      "Bash(curl -s http://localhost:5000/status)"
     ]
   }
 }

@@ -5,7 +5,8 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/server.js",
-    "dev": "tsx --env-file=.env src/server.ts"
+    "dev": "tsx --env-file=.env src/server.ts",
+    "db:seed-mpas": "tsx --env-file=.env scripts/import-mpas.ts"
   },
   "dependencies": {
     "pg": "^8.13.0",

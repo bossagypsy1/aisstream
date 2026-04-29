@@ -7,6 +7,7 @@ import {
   upsertVessels,
   loadAllVessels,
   cleanupOldVessels,
+  loadMpasForLocale,
   VesselRow,
 } from './db';
 import { LOCALES, DEFAULT_LOCALE, Locale } from './locales';
@@ -15,7 +16,8 @@ import { LOCALES, DEFAULT_LOCALE, Locale } from './locales';
 // Configuration
 // ---------------------------------------------------------------------------
 
-const PORT = 5000;
+const DEFAULT_PORT = 5000;
+const PORT = Number(process.env.PORT) || DEFAULT_PORT;
 const AISSTREAM_URL = 'wss://stream.aisstream.io/v0/stream';
 const API_KEY = 'ac0083bc3324249a8bc4572aebaf89f1314abb7a';
 
@@ -531,6 +533,23 @@ const httpServer = http.createServer((req, res) => {
         firstRawMessages: rawMessageLog,
       }, null, 2)
     );
+    return;
+  }
+
+  if (req.url?.startsWith('/mpas')) {
+    const url = new URL(req.url, `http://localhost:${PORT}`);
+    const localeId = url.searchParams.get('localeId') ?? activeLocale.id;
+    void loadMpasForLocale(localeId).then((features) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        type: 'FeatureCollection',
+        localeId,
+        features,
+      }));
+    }).catch(() => {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Failed to load MPA layer' }));
+    });
     return;
   }
 

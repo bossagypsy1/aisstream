@@ -1,4 +1,4 @@
-I have a local AIS backend running at http://localhost:3001 that streams real vessel data from AISStream.io.
+I have a local AIS backend running at http://localhost:5000 that streams real vessel data from AISStream.io.
 Replace all demo/mock/simulated data in this project with live data from that backend.
 
 ---
@@ -9,7 +9,7 @@ There are two ways to consume data from the backend:
 
 --- Option A: WebSocket (preferred — live push updates) ---
 
-Connect to: ws://localhost:3001
+Connect to: ws://localhost:5000
 
 You will receive three message types:
 
@@ -39,7 +39,7 @@ Reconnect automatically if the WebSocket closes (retry every 3 seconds).
 
 --- Option B: HTTP polling (fallback) ---
 
-GET http://localhost:3001/status
+GET http://localhost:5000/status
 Returns:
 {
   "connected": true,

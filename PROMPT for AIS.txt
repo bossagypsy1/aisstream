@@ -5,7 +5,7 @@ Build a local AIS vessel data viewer using Node.js + TypeScript that connects to
 ARCHITECTURE
 
 - Single Node.js process, no frameworks
-- HTTP server on port 3001 (serves the HTML page and a /status + /debug REST endpoint)
+- HTTP server on port 5000 (serves the HTML page and a /status + /debug REST endpoint)
 - WebSocket server on the same port pushes live updates to the browser
 - AISStream WebSocket client runs on the backend only — browser never touches AISStream directly
 - Four files total: package.json, tsconfig.json, src/server.ts, public/index.html
@@ -94,7 +94,7 @@ npm install is run via: npm.cmd install
 Server is started via: nohup node node_modules/tsx/dist/cli.mjs src/server.ts > server.log 2>&1 &
 (npx may not be available in all shell environments on Windows)
 
-Then open: http://localhost:3001
+Then open: http://localhost:5000
 
 ---
 
